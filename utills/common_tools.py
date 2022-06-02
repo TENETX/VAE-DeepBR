@@ -1,4 +1,3 @@
-# -*- coding: UTF-8 -*-
 import random
 
 from scipy.io import loadmat
@@ -27,8 +26,10 @@ def load_mat_data(file_name, need_zscore=False):
     views_features = 0.0
     try:
         dataset = loadmat(file_name)
-        data = dataset['data']
-        target = dataset['target']
+        # data = dataset['data']
+        # target = dataset['target'].T
+        data = np.append(dataset['test_data'], dataset['train_data'], axis=0)
+        target = np.append(dataset['test_target'], dataset['train_target'], axis=1).T
         views_features = np.array(data, dtype=np.float32)
         views_features = torch.from_numpy(views_features)
         target = np.array(target, dtype=np.float32)
@@ -69,7 +70,7 @@ def split_data_set_by_idx(features, labels, idx_list, test_split_id, args):
 
     # missing_label
     train_partial_labels, _ = missing_label(
-        train_labels, missing_rate=args.missing_rate, missing_num=args.missing_num)
+        train_labels.clone(), args.missing_rate)
 
     train_partial_labels = torch.Tensor(train_partial_labels)
     return train_features, train_labels, train_partial_labels, test_features, test_labels

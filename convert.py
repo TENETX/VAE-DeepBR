@@ -2,7 +2,7 @@ from scipy.io import loadmat, savemat
 import numpy as np
 
 
-dataname = r'data/genbase.mat'
+dataname = r'data/education.mat'
 dataset = loadmat(dataname)
 case = 1
 

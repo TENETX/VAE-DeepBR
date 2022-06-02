@@ -1,4 +1,4 @@
-# -*- coding: UTF-8 -*-
+import math
 import os
 import torch
 import torch.optim as optim
@@ -7,39 +7,23 @@ import torch.nn.functional as F
 from utills.ml_metrics import all_metrics
 from Vutils import gauss_kl_loss
 import numpy as np
-from Vmain import label_enhance
 # from torch.optim import lr_scheduler
+from tensorboardX import SummaryWriter
+writer = SummaryWriter(log_dir='scalar')
 
 
-def train(model, device, views_data_loader, args, loss_coefficient,
-          train_features, train_partial_labels, test_features, test_labels, choose, enc=None, dec=None, fold=1):
-
-    opti = []
-
+def train(model, device, data_loader, args, loss_coefficient,
+          train_features, train_partial_labels, test_features, test_labels, enc=None, dec=None, fold=1):
     # init optimizer
     if args.opt == 'adam':
-        if choose == 2:
-            opti_all = optim.Adam(list(model.parameters(
-            )) + list(enc.parameters()) + list(dec.parameters()), lr=args.lr, weight_decay=1e-5)
-            opti = [opti_all]
-        elif choose == 3:
-            opti_ml = optim.Adam(list(model.parameters()),
-                                 lr=args.lr, weight_decay=1e-5)
-            opti_le = optim.Adam(list(enc.parameters(
-            )) + list(dec.parameters()), lr=args.Vlearning_rate, weight_decay=1e-5)
-            opti = [opti_ml, opti_le]
-        else:
-            opti_br = optim.Adam(list(model.parameters()), lr=args.lr, weight_decay=1e-5)
-            opti = [opti_br]
-        # scheduler = lr_scheduler.MultiStepLR(
-        #     optimizer, milestones=[500, 800, 900], gamma=0.2, last_epoch=-1)
-        # scheduler.step()
+        opti = optim.Adam(list(model.parameters(
+        )) + list(enc.parameters()) + list(dec.parameters()), lr=args.lr, weight_decay=1e-5)
     else:
         # SGD很少用
         return
     # train model
-    trainer = Trainer(model, views_data_loader, args.epoch, opti, args.show_epoch,
-                      loss_coefficient, args.model_save_epoch, args.model_save_dir, device, choose, args.smoothing_rate, enc, dec)
+    trainer = Trainer(model, data_loader, args.epoch, opti, args.show_epoch,
+                      loss_coefficient, args.model_save_epoch, args.model_save_dir, device, args.smoothing_rate, enc, dec)
     loss_list = trainer.fit(
         fold, train_features, train_partial_labels, test_features, test_labels, args)
 
@@ -76,155 +60,107 @@ def test(model, features, labels, device, model_state_path=None, is_eval=False, 
 
 class Trainer(object):
     def __init__(self, model, train_data_loader, epoch, optimizer, show_epoch,
-                 loss_coefficient, model_save_epoch, model_save_dir, device, choose, smoothing, enc=None, dec=None):
+                 loss_coefficient, model_save_epoch, model_save_dir, device, smoothing, enc=None, dec=None):
         self.model = model
         self.enc = enc
         self.dec = dec
         self.train_data_loader = train_data_loader
         self.epoch = epoch
-        if choose == 1:
-            self.opti_br = optimizer[0]
-        elif choose == 2:
-            self.opti_all = optimizer[0]
-        else:
-            self.opti_ml = optimizer[0]
-            self.opti_le = optimizer[1]
+        self.opti_all = optimizer
         self.show_epoch = show_epoch
         self.loss_coefficient = loss_coefficient
         self.model_save_epoch = model_save_epoch
         self.model_save_dir = model_save_dir
         self.device = device
-        self.choose = choose
         self.smoothing = smoothing
 
     def fit(self, fold, train_features, train_partial_labels, test_features, test_labels, args=None):
         loss_list = []
-
         # VAE records
         if not os.path.exists(self.model_save_dir):
             os.makedirs(self.model_save_dir)
-        # 为了加快速度，索性在外面套判断
-        if self.choose == 1:
-            for epoch in range(self.epoch):
-                self.model.train()
-                for step, train_data in enumerate(self.train_data_loader):
-                    inputs, labels, index = train_data
-                    # print(inputs)
-                    outputs = self.model(inputs)
-                    # BR loss
-                    with torch.no_grad():
-                        labels = labels * (1 - self.smoothing) + \
-                            0.5 * self.smoothing
-                    lossBR = F.binary_cross_entropy(outputs, labels)
-                    # print_str = f'Epoch: {epoch}\t BR Loss: {lossBR:.4f} \t'
-                    # show loss info
-                    if epoch % self.show_epoch == 0 and step == 0:
-                        epoch_loss = dict()
-                        loss_list.append(epoch_loss)
-                        # print(print_str)
-                    self.opti_br.zero_grad()
-                    lossBR.backward()
-                    self.opti_br.step()
-        elif self.choose == 2:
-            for epoch in range(self.epoch):
-                self.enc.train()
-                self.dec.train()
-                self.model.train()
-                for step, train_data in enumerate(self.train_data_loader):
-                    inputs, labels, index = train_data
-                    batch_x = inputs[0]
-                    batch_y = labels
-                    batch_x, batch_y = batch_x.to(
-                        self.device), batch_y.to(self.device)
-                    batch_data = torch.cat((batch_x, batch_y), 1)
+        for epoch in range(self.epoch):
+            self.enc.train()
+            self.dec.train()
+            self.model.train()
+            num_x = 0
+            for step, train_data in enumerate(self.train_data_loader):
+                inputs, labels_r, index = train_data
+                batch_x = inputs[0]
+                batch_y = labels_r
+                batch_x, batch_y = batch_x.to(
+                    self.device), batch_y.to(self.device)
+                batch_data = torch.cat((batch_x, batch_y), 1)
 
-                    # forward
-                    (mu, sigma) = self.enc(batch_data)
-                    z = mu + sigma * (torch.randn(mu.size()).to(self.device))
-                    batch_x_hat = self.dec(z)
-                    d = F.sigmoid(z[:, -args.Vnum_class:])
+                # forward
+                (mu, sigma) = self.enc(batch_data)
+                z = mu + sigma * (torch.randn(mu.size()).to(self.device))
+                batch_x_hat = self.dec(z)
+                d = F.sigmoid(z[:, -args.Vnum_class:])
 
-                    # VAE loss
-                    rec_loss_x = F.mse_loss(batch_x_hat, batch_x)
-                    kl_loss = gauss_kl_loss(mu, sigma)
-                    rec_loss_y = F.binary_cross_entropy(d, batch_y)
-                    lossVAE = rec_loss_y + args.Valpha * kl_loss + args.Vbeta * rec_loss_x
+                # VAE loss
+                rec_loss_x = F.mse_loss(batch_x_hat, batch_x)
+                kl_loss = gauss_kl_loss(mu, sigma)
+                rec_loss_y = F.binary_cross_entropy(d, batch_y)
+                lossVAE = rec_loss_y + args.Valpha * kl_loss + args.Vbeta * rec_loss_x
 
-                    # print(inputs)
-                    outputs = self.model(inputs)
-                    labels = d.detach().to(self.device)
-
-                    # BR loss
-                    with torch.no_grad():
-                        labels = labels * (1 - self.smoothing) + \
-                            0.5 * self.smoothing
-                    lossBR = F.binary_cross_entropy(outputs, labels)
-                    loss = lossBR + lossVAE
-                    # print_str = f'Epoch: {epoch}\t loss: {loss:.4f} \t VAE Loss: {lossVAE:.4f} \t BR Loss: {lossBR:.4f} \t'
-                    # show loss info
-                    if epoch % self.show_epoch == 0 and step == 0:
-                        epoch_loss = dict()
-                        # writer.add_scalar("Loss/train", lossBR, epoch)  # log
-                        # plotter.plot('loss', 'train', 'Class Loss', epoch, _ML_loss)
-                        loss_list.append(epoch_loss)
-                        # print(print_str)
-                    self.opti_all.zero_grad()
-                    loss.backward()
-                    self.opti_all.step()
-        else:
-            for epoch in range(self.epoch):
-                self.enc.train()
-                self.dec.train()
-                for step, train_data in enumerate(self.train_data_loader):
-                    inputs, labels, index = train_data
-                    batch_x = inputs[0]
-                    batch_y = labels
-                    batch_x, batch_y = batch_x.to(
-                        self.device), batch_y.to(self.device)
-                    batch_data = torch.cat((batch_x, batch_y), 1)
-                    # forward
-                    (mu, sigma) = self.enc(batch_data)
-                    z = mu + sigma * (torch.randn(mu.size()).to(self.device))
-                    batch_x_hat = self.dec(z)
-                    d = F.sigmoid(z[:, -args.Vnum_class:])
-                    # VAE loss
-                    rec_loss_x = F.mse_loss(batch_x_hat, batch_x)
-                    kl_loss = gauss_kl_loss(mu, sigma)
-                    rec_loss_y = F.binary_cross_entropy(d, batch_y)
-                    lossVAE = rec_loss_y + args.Valpha * kl_loss + args.Vbeta * rec_loss_x
-                    # print_str = f'Epoch: {epoch}\t loss: {loss:.4f} \t VAE Loss: {lossVAE:.4f} \t BR Loss: {lossBR:.4f} \t'
-                    # show loss info
-                    if epoch % self.show_epoch == 0 and step == 0:
-                        epoch_loss = dict()
-                        # writer.add_scalar("Loss/train", lossBR, epoch)  # log
-                        # plotter.plot('loss', 'train', 'Class Loss', epoch, _ML_loss)
-                        loss_list.append(epoch_loss)
-                        # print(print_str)
-                    self.opti_le.zero_grad()
-                    lossVAE.backward()
-                    self.opti_le.step()
-            for epoch in range(self.epoch):
-                self.model.train()
-                for step, train_data in enumerate(self.train_data_loader):
-                    inputs, labels, index = train_data
-                    # label_enhance
-                    labels = label_enhance(self.enc, inputs[0], labels.numpy(), args)
-                    labels = torch.from_numpy(labels).to(self.device)
-                    outputs = self.model(inputs)
-                    # BR loss
-                    with torch.no_grad():
-                        labels = labels * (1 - self.smoothing) + \
-                            0.5 * self.smoothing
-                    lossBR = F.binary_cross_entropy(outputs, labels)
-                    # print_str = f'Epoch: {epoch}\t BR Loss: {lossBR:.4f} \t'
-                    # show loss info
-                    if epoch % self.show_epoch == 0 and step == 0:
-                        epoch_loss = dict()
-                        loss_list.append(epoch_loss)
-                        # print(print_str)
-                    self.opti_ml.zero_grad()
-                    lossBR.backward()
-                    self.opti_ml.step()
+                # print(inputs)
+                outputs = self.model(inputs)
+                labels = d.detach().to(self.device)
+                # 需要选择合适的loss函数
+                # rate = 1
+                # rate = np.exp(-epoch)
+                # rate = math.cos((epoch / self.epoch) * math.pi / 2)
+                if epoch <= 100:
+                    rate = 0
+                elif epoch > 100:
+                    rate = 0.2
+                elif epoch > 200:
+                    rate = 0.4
+                elif epoch > 300:
+                    rate = 0.6
+                elif epoch > 400:
+                    rate = 0.8
+                else:
+                    rate = 0.9
+                # ------------------------------------------
+                labels_new = labels_r * rate + labels * (1 - rate)
+                # BR loss
+                newM = (labels_new * torch.log(outputs) + (1.0 - labels_new) * torch.log(1.0 - outputs))
+                lossBR = - newM.mean()
+                loss = lossBR + lossVAE
+                num_x += 1
+                loss_list.append(loss.item())
+                # print_str = f'Epoch: {epoch}\t loss: {loss:.4f} \t VAE Loss: {lossVAE:.4f} \t BR Loss: {lossBR:.4f} \t'
+                # show loss info
+                self.opti_all.zero_grad()
+                loss.backward()
+                self.opti_all.step()
+                if epoch % self.show_epoch == 0 and step == 0:
+                    epoch_loss = dict()
+                    loss_list.append(epoch_loss)
+                    metrics_results, _ = test(
+                        self.model, test_features, test_labels, self.device, is_eval=True, args=args)
+                    writer.add_scalar("Smooth/Smooth", rate, epoch)
+                    writer.add_scalar("Loss/lossVAE", lossVAE, epoch)
+                    writer.add_scalar("Loss/lossBR", lossBR, epoch)
+                    writer.add_scalar("Loss/loss", loss, epoch)
+                    writer.add_scalar(
+                        "hamming_loss", metrics_results["hamming_loss"], epoch)
+                    writer.add_scalar(
+                        "ranking_loss", metrics_results["ranking_loss"], epoch)
+                    writer.add_scalar(
+                        "avg_precision", metrics_results["avg_precision"], epoch)
+                    writer.add_scalar("Loss/lossVAE", lossVAE, epoch)
+                    writer.add_scalar("Loss/lossBR", lossBR, epoch)
+                    writer.add_scalar("Loss/loss", loss, epoch)
+                    writer.add_scalar(
+                        "hamming_loss", metrics_results["hamming_loss"], epoch)
+                    writer.add_scalar(
+                        "ranking_loss", metrics_results["ranking_loss"], epoch)
+                    writer.add_scalar(
+                        "avg_precision", metrics_results["avg_precision"], epoch)
+        writer.close()
         return loss_list
 
 

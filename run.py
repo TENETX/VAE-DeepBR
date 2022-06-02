@@ -1,7 +1,5 @@
-# -*- coding: UTF-8 -*-
 import os
 import xlwt
-from functools import reduce
 import numpy as np
 from torch.utils.data import DataLoader
 # from torch.utils.tensorboard import SummaryWriter
@@ -12,13 +10,11 @@ from utills.common_tools import split_data_set_by_idx, ViewsDataset, init_random
 from Vmodel import VAE_Encoder, VAE_Bernulli_Decoder
 
 
-def run(args, save_dir, file_name, choose):
-    choose_status = ['N', 'Only BR', 'VAE+BR combine', 'VAE+BR two_stage']
+def run(args, save_dir, file_name):
     print('*' * 30)
     print('dataset:\t', args.DATA_SET_NAME)
     print('optimizer:\t Adam')
     print('missing rate:\t', args.missing_rate)
-    print('choose status:\t', choose_status[choose])
     print('smoothing rate:\t', args.smoothing_rate)
     print('*' * 30)
 
@@ -29,7 +25,6 @@ def run(args, save_dir, file_name, choose):
 
     features, labels, idx_list = load_mat_data(
         os.path.join(args.DATA_ROOT, args.DATA_SET_NAME + '.mat'), True)
-
     fold_list, metrics_results = [], []
     rets = np.zeros((Fold_numbers, 11))  # 11 metrics
 
@@ -54,31 +49,23 @@ def run(args, save_dir, file_name, choose):
             train_features, train_partial_labels, device)
         views_data_loader = DataLoader(
             views_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-        view_code_list = list(train_features.keys())
-        view_feature_nums_list = [train_features[code].shape[1]
-                                  for code in view_code_list]
-        feature_dim = reduce(lambda x, y: x + y, view_feature_nums_list)
+        feature_dim = features.shape[1]
         label_nums = train_labels.shape[1]
 
         # load model
         model = Model(feature_dim, label_nums, device, args).to(device)
-        if choose != 1:
-            enc = VAE_Encoder(n_in=n_feature + n_label,
-                              n_hidden=args.Vn_hidden, n_out=args.Vdim_z, keep_prob=args.Vkeep_prob)
-            dec = VAE_Bernulli_Decoder(n_in=args.Vdim_z, n_hidden=args.Vn_hidden,
-                                       n_out=n_feature, keep_prob=args.Vkeep_prob)
-        else:
-            enc = None
-            dec = None
+        enc = VAE_Encoder(n_in=n_feature + n_label,
+                          n_hidden=args.Vn_hidden, n_out=args.Vdim_z, keep_prob=args.Vkeep_prob)
+        dec = VAE_Bernulli_Decoder(n_in=args.Vdim_z, n_hidden=args.Vn_hidden,
+                                   n_out=n_feature, keep_prob=args.Vkeep_prob)
         # training
         loss_list = train(model, device, views_data_loader, args, loss_coefficient,
-                          train_features, train_partial_labels, test_features, test_labels, choose, enc, dec, fold=1)
+                          train_features, train_partial_labels, test_features, test_labels, enc, dec, fold=1)
         metrics_results, _ = test(
             model, test_features, test_labels, device, is_eval=True, args=args)
         fold_list.append(loss_list)
         for i, key in enumerate(metrics_results):
             rets[fold][i] = metrics_results[key]
-
     print("\n------------BR--summary--------------")
     means = np.mean(rets, axis=0)
     stds = np.std(rets, axis=0)
@@ -104,17 +91,16 @@ if __name__ == '__main__':
     init_random_seed(args.seed)
     args.device = 'cpu'
 
-    missing_rates = [0.3]
+    missing_rates = [0.1]
 
-    datanames = ['genbase']
-
+    # datanames = ['emotions', 'arts', 'medical', 'rcv1subset1_top944', 'rcv1subset2_top944', 'rcv1subset3_top944', 'rcv1subset4_top944', 'rcv1subset5_top944']
+    datanames = ['medical']
+    # datanames = ['recreation1']
     # 1：BR, 2: VAE+BR, 3: Two_stage
-    chooses = [3]
-    for choose in chooses:
-        for dataname in datanames:
-            for p in missing_rates:
-                args.DATA_SET_NAME = dataname
-                args.missing_rate = p
-                save_dir = f'results/{dataname}/'
-                save_name = f'{args.DATA_SET_NAME}-p{p}-r{args.missing_num}'
-                run(args, save_dir, save_name, choose)
+    for dataname in datanames:
+        for p in missing_rates:
+            args.DATA_SET_NAME = dataname
+            args.missing_rate = p
+            save_dir = f'results/{dataname}/'
+            save_name = f'{args.DATA_SET_NAME}-p{p}-r{args.missing_num}'
+            run(args, save_dir, save_name)
